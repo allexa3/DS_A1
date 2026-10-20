@@ -55,7 +55,7 @@ services:
     volumes:
       - user-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${USER_DB_USER} -d ${USER_DB_NAME}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${USER_DB_USER} -d ${USER_DB_NAME}" ]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -95,7 +95,7 @@ services:
     volumes:
       - device-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DEVICE_DB_USER} -d ${DEVICE_DB_NAME}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${DEVICE_DB_USER} -d ${DEVICE_DB_NAME}" ]
       interval: 5s
       timeout: 3s
       retries: 10
