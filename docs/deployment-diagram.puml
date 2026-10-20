@@ -1,0 +1,44 @@
+@startuml deployment-diagram
+title Energy Management System - UML Deployment Diagram (Project P1)
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+
+actor "Browser /\nHTTP client" as client
+
+node "Docker host" {
+
+  node "Docker network: ems_edge" as edge {
+    node "traefik:v3.6\n<<container>>" as proxyNode {
+      component "Reverse Proxy\n(Traefik)" as proxy
+    }
+    node "user-service\n<<container>>" as userNode {
+      component "User Management\nMicroservice\n(Spring Boot, REST)" as userSvc
+    }
+    node "device-service\n<<container>>" as deviceNode {
+      component "Device Management\nMicroservice\n(Spring Boot, REST)" as deviceSvc
+    }
+  }
+
+  node "Docker network: ems_user_data" as ud {
+    node "user-db\n<<container postgres:16>>" as userDbNode {
+      database "User Database" as userDb
+    }
+  }
+
+  node "Docker network: ems_device_data" as dd {
+    node "device-db\n<<container postgres:16>>" as deviceDbNode {
+      database "Device Database" as deviceDb
+    }
+  }
+}
+
+client --> proxy : HTTP :80\n/api/users/**\n/api/devices/**
+proxy --> userSvc : HTTP :8080\nPathPrefix(/api/users)
+proxy --> deviceSvc : HTTP :8080\nPathPrefix(/api/devices)
+userSvc --> userDb : JDBC :5432
+deviceSvc --> deviceDb : JDBC :5432
+deviceSvc ..> userSvc : REST (validate user on assign)
+userSvc ..> deviceSvc : REST (unassign devices on user delete)
+
+@enduml

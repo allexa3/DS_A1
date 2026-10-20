@@ -1,48 +1,115 @@
+# Energy Management System - Project P1
+# Reverse proxy (Traefik) + User service + Device service + one PostgreSQL database per service.
+
 services:
-  mysql-db:
-    image: mysql:8.4
-    container_name: mysql-db #optional - container_name commented out results in <project>-mysql-db-1, instead of db
+  # ---------------------------------------------------------------- reverse proxy
+  traefik:
+    image: traefik:v3.6
+    container_name: ems-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false   # only containers with traefik.enable=true are routed
+      - --providers.docker.network=ems_edge
+      - --entrypoints.web.address=:80
+      - --api.dashboard=true
+      - --api.insecure=true                         # dashboard on :8080 inside the container (dev only)
+    ports:
+      - "${GATEWAY_PORT:-80}:80"                    # the ONLY entry point to the system
+      - "${TRAEFIK_DASHBOARD_PORT:-8090}:8080"      # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - edge
+
+  # ---------------------------------------------------------------- user microservice
+  user-service:
+    build: ./user-service
+    container_name: ems-user-service
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${DB_USER}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-    ports:
-      - "3306:3306" #optional - if you want to connect from a db tool, if MYSQL is also installed directly, change the port to 3307 or any unused port
+      DB_URL: jdbc:postgresql://user-db:5432/${USER_DB_NAME}
+      DB_USER: ${USER_DB_USER}
+      DB_PASSWORD: ${USER_DB_PASSWORD}
+      DEVICE_SERVICE_URL: http://device-service:8080
+    depends_on:
+      user-db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.user.rule=PathPrefix(`/api/users`)
+      - traefik.http.routers.user.entrypoints=web
+      - traefik.http.services.user.loadbalancer.server.port=8080
+    networks:
+      - edge
+      - user_data
+
+  user-db:
+    image: postgres:16-alpine
+    container_name: ems-user-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${USER_DB_NAME}
+      POSTGRES_USER: ${USER_DB_USER}
+      POSTGRES_PASSWORD: ${USER_DB_PASSWORD}
     volumes:
-      - mysql-data:/var/lib/mysql
+      - user-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD", "mysqladmin", "ping", "-h", "127.0.0.1" ]
+      test: ["CMD-SHELL", "pg_isready -U ${USER_DB_USER} -d ${USER_DB_NAME}"]
       interval: 5s
       timeout: 3s
       retries: 10
-      start_period: 30s
     networks:
-      - demo_net
+      - user_data
 
-  spring-demo:
-    build: .
-    container_name: spring-demo
+  # ---------------------------------------------------------------- device microservice
+  device-service:
+    build: ./device-service
+    container_name: ems-device-service
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     environment:
-      DB_HOST: mysql-db
-      DB_PORT: 3306
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
+      DB_URL: jdbc:postgresql://device-db:5432/${DEVICE_DB_NAME}
+      DB_USER: ${DEVICE_DB_USER}
+      DB_PASSWORD: ${DEVICE_DB_PASSWORD}
+      USER_SERVICE_URL: http://user-service:8080
     depends_on:
-      mysql-db:
+      device-db:
         condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.device.rule=PathPrefix(`/api/devices`)
+      - traefik.http.routers.device.entrypoints=web
+      - traefik.http.services.device.loadbalancer.server.port=8080
     networks:
-      - demo_net
+      - edge
+      - device_data
 
+  device-db:
+    image: postgres:16-alpine
+    container_name: ems-device-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DEVICE_DB_NAME}
+      POSTGRES_USER: ${DEVICE_DB_USER}
+      POSTGRES_PASSWORD: ${DEVICE_DB_PASSWORD}
+    volumes:
+      - device-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DEVICE_DB_USER} -d ${DEVICE_DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - device_data
 
 volumes:
-  mysql-data:
+  user-db-data:
+  device-db-data:
 
 networks:
-  demo_net:
-    name: demo_net
+  edge:            # proxy <-> services (and service <-> service)
+    name: ems_edge
+  user_data:       # user-service <-> user-db only
+    name: ems_user_data
+  device_data:     # device-service <-> device-db only
+    name: ems_device_data
