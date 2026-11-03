@@ -1,16 +1,23 @@
 @startuml deployment-diagram
-title Energy Management System - UML Deployment Diagram (Project P1)
+title Energy Management System - UML Deployment Diagram (Assignment 1 + Project P1)
 
 skinparam componentStyle rectangle
 skinparam shadowing false
 
-actor "Browser /\nHTTP client" as client
+actor "Browser" as client
 
 node "Docker host" {
 
   node "Docker network: ems_edge" as edge {
     node "traefik:v3.6\n<<container>>" as proxyNode {
-      component "Reverse Proxy\n(Traefik)" as proxy
+      component "Reverse Proxy\n(Traefik routers)" as proxy
+      component "Validation\n(forwardAuth middleware)" as validation
+    }
+    node "frontend\n<<container nginx>>" as frontNode {
+      component "Web client\n(React SPA)" as front
+    }
+    node "auth-service\n<<container>>" as authNode {
+      component "Authorization Service\n(Spring Boot, JWT)" as authSvc
     }
     node "user-service\n<<container>>" as userNode {
       component "User Management\nMicroservice\n(Spring Boot, REST)" as userSvc
@@ -20,12 +27,16 @@ node "Docker host" {
     }
   }
 
+  node "Docker network: ems_auth_data" as ad {
+    node "auth-db\n<<container postgres:16>>" as authDbNode {
+      database "Credential Database" as authDb
+    }
+  }
   node "Docker network: ems_user_data" as ud {
     node "user-db\n<<container postgres:16>>" as userDbNode {
       database "User Database" as userDb
     }
   }
-
   node "Docker network: ems_device_data" as dd {
     node "device-db\n<<container postgres:16>>" as deviceDbNode {
       database "Device Database" as deviceDb
@@ -33,12 +44,21 @@ node "Docker host" {
   }
 }
 
-client --> proxy : HTTP :80\n/api/users/**\n/api/devices/**
-proxy --> userSvc : HTTP :8080\nPathPrefix(/api/users)
-proxy --> deviceSvc : HTTP :8080\nPathPrefix(/api/devices)
+client --> proxy : HTTP :80 (only published port)
+proxy --> front : "/"  (priority 1)
+proxy --> authSvc : POST /api/auth/login\nPOST /api/auth/register\n(public)
+proxy --> validation : every /api/users/** and /api/devices/**
+validation ..> authSvc : GET /api/auth/validate\nBearer token + X-Forwarded-Method/Uri\n200 + X-User-* | 401 | 403
+proxy --> userSvc : /api/users/**\n(only if validated)
+proxy --> deviceSvc : /api/devices/**\n(only if validated)
+
+authSvc --> authDb : JDBC :5432
 userSvc --> userDb : JDBC :5432
 deviceSvc --> deviceDb : JDBC :5432
-deviceSvc ..> userSvc : REST (validate user on assign)
-userSvc ..> deviceSvc : REST (unassign devices on user delete)
+
+userSvc ..> authSvc : PUT/DELETE /internal/credentials/{id}\n(keep credentials in sync)
+authSvc ..> userSvc : POST /api/users\n(self-registration)
+deviceSvc ..> userSvc : GET /api/users/{id}\n(validate user on assign)
+userSvc ..> deviceSvc : DELETE /api/devices/user/{id}\n(unassign on user delete)
 
 @enduml

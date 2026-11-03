@@ -1,5 +1,6 @@
-# Energy Management System - Project P1
-# Reverse proxy (Traefik) + User service + Device service + one PostgreSQL database per service.
+# Energy Management System - Assignment 1 + Project P1
+# Reverse proxy / API gateway (Traefik + forwardAuth) + Frontend + Authentication, User and Device services,
+# one PostgreSQL database per service. The proxy is the only published entry point.
 
 services:
   # ---------------------------------------------------------------- reverse proxy
@@ -22,6 +23,54 @@ services:
     networks:
       - edge
 
+  # ---------------------------------------------------------------- authentication microservice
+  auth-service:
+    build: ./auth-service
+    container_name: ems-auth-service
+    restart: unless-stopped
+    environment:
+      DB_URL: jdbc:postgresql://auth-db:5432/${AUTH_DB_NAME}
+      DB_USER: ${AUTH_DB_USER}
+      DB_PASSWORD: ${AUTH_DB_PASSWORD}
+      USER_SERVICE_URL: http://user-service:8080
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRATION_MINUTES: ${JWT_EXPIRATION_MINUTES:-60}
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      # forwardAuth middleware = the "Validation" box of the API gateway: Traefik asks this endpoint before
+      # forwarding any request and copies the identity headers it returns to the upstream request.
+      - traefik.http.middlewares.ems-auth.forwardauth.address=http://auth-service:8080/api/auth/validate
+      - traefik.http.middlewares.ems-auth.forwardauth.authResponseHeaders=X-User-Id,X-User-Name,X-User-Role
+      # public routes only: login, register and the API documentation. /api/auth/validate and /internal are NOT routed.
+      - traefik.http.routers.auth.rule=PathPrefix(`/api/auth/login`) || PathPrefix(`/api/auth/register`) || PathPrefix(`/api/auth/swagger-ui`) || PathPrefix(`/api/auth/v3/api-docs`)
+      - traefik.http.routers.auth.entrypoints=web
+      - traefik.http.routers.auth.priority=100
+      - traefik.http.services.auth.loadbalancer.server.port=8080
+    networks:
+      - edge
+      - auth_data
+
+  auth-db:
+    image: postgres:16-alpine
+    container_name: ems-auth-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AUTH_DB_NAME}
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${AUTH_DB_USER} -d ${AUTH_DB_NAME}" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - auth_data
+
   # ---------------------------------------------------------------- user microservice
   user-service:
     build: ./user-service
@@ -32,13 +81,24 @@ services:
       DB_USER: ${USER_DB_USER}
       DB_PASSWORD: ${USER_DB_PASSWORD}
       DEVICE_SERVICE_URL: http://device-service:8080
+      AUTH_SERVICE_URL: http://auth-service:8080
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
     depends_on:
       user-db:
         condition: service_healthy
     labels:
       - traefik.enable=true
+      # protected API: every request is validated by the gateway (forwardAuth -> auth-service)
       - traefik.http.routers.user.rule=PathPrefix(`/api/users`)
       - traefik.http.routers.user.entrypoints=web
+      - traefik.http.routers.user.middlewares=ems-auth@docker
+      - traefik.http.routers.user.service=user
+      # Swagger UI and the OpenAPI document stay public (higher priority than the protected router)
+      - traefik.http.routers.user-docs.rule=PathPrefix(`/api/users/swagger-ui`) || PathPrefix(`/api/users/v3/api-docs`)
+      - traefik.http.routers.user-docs.entrypoints=web
+      - traefik.http.routers.user-docs.priority=100
+      - traefik.http.routers.user-docs.service=user
       - traefik.http.services.user.loadbalancer.server.port=8080
     networks:
       - edge
@@ -79,6 +139,12 @@ services:
       - traefik.enable=true
       - traefik.http.routers.device.rule=PathPrefix(`/api/devices`)
       - traefik.http.routers.device.entrypoints=web
+      - traefik.http.routers.device.middlewares=ems-auth@docker
+      - traefik.http.routers.device.service=device
+      - traefik.http.routers.device-docs.rule=PathPrefix(`/api/devices/swagger-ui`) || PathPrefix(`/api/devices/v3/api-docs`)
+      - traefik.http.routers.device-docs.entrypoints=web
+      - traefik.http.routers.device-docs.priority=100
+      - traefik.http.routers.device-docs.service=device
       - traefik.http.services.device.loadbalancer.server.port=8080
     networks:
       - edge
@@ -102,13 +168,30 @@ services:
     networks:
       - device_data
 
+  # ---------------------------------------------------------------- web client
+  frontend:
+    build: ./frontend
+    container_name: ems-frontend
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.frontend.rule=PathPrefix(`/`)
+      - traefik.http.routers.frontend.entrypoints=web
+      - traefik.http.routers.frontend.priority=1      # lowest: every /api/** router wins over it
+      - traefik.http.services.frontend.loadbalancer.server.port=80
+    networks:
+      - edge
+
 volumes:
+  auth-db-data:
   user-db-data:
   device-db-data:
 
 networks:
   edge:            # proxy <-> services (and service <-> service)
     name: ems_edge
+  auth_data:       # auth-service <-> auth-db only
+    name: ems_auth_data
   user_data:       # user-service <-> user-db only
     name: ems_user_data
   device_data:     # device-service <-> device-db only
